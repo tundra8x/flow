@@ -1,37 +1,36 @@
 #!/usr/bin/python3
-"""Disable dnf repos whose GPG key file is genuinely missing from the image.
+"""Remove dnf repo definitions whose GPG key file is missing from the image.
 
 Why this exists
 ---------------
-The anaconda-iso build depsolves packages for the installer using the repos
-defined inside the image. Bazzite ships repo definitions pointing at GPG key
-files that are not present, e.g.:
+bootc-image-builder depsolves packages for the Anaconda installer using the repo
+definitions inside the image. Bazzite ships definitions pointing at GPG key files
+that are not present, and the ISO build dies:
 
     Failed to retrieve GPG key for repo 'terra-mesa':
     Couldn't open file /etc/pki/rpm-gpg/RPM-GPG-KEY-terra44-mesa
 
-Such a repo is already unusable - dnf cannot verify packages from it - but it is
-enabled, so depsolve consults it and the ISO build dies.
+Three things learned the expensive way, each from a failed build
+---------------------------------------------------------------
+1. gpgkey paths contain dnf variables ($releasever, $basearch). Comparing them
+   literally marks every core Fedora repo as missing. Expand first; if a path
+   still holds an unknown variable, leave the repo alone, because an
+   unverifiable path is not evidence of a broken repo.
 
-We disable those repos rather than setting gpgcheck=0 or deleting the gpgkey
-line. Both of those would "fix" the build by disabling signature verification on
-a repo shipped to people installing Flow, which is not a trade worth making.
-Disabling an already-broken repo costs nothing: Flow updates as a whole image
-via bootc, not by pulling from these repos.
+2. Never touch every repo. An early version disabled 19 and the build died with
+   "There are no enabled repositories". If this would remove everything, that is
+   a bug here, not a broken image, so it fails loudly and writes nothing.
 
-Two hard-won rules, both from a build that failed
-------------------------------------------------
-1. gpgkey paths contain dnf variables ($releasever, $basearch). Checking them
-   literally marks every core Fedora repo as missing. Expand first, and if a
-   path still holds an unknown variable, leave the repo alone - an unverifiable
-   path is not evidence of a broken repo.
+3. **Removing beats disabling.** terra-mesa already ships as enabled=0 and
+   bootc-image-builder consults it regardless, so setting enabled=0 changes
+   nothing. The definition has to actually go.
 
-2. Never disable every repo. A first version disabled 19 of them and the build
-   died with "There are no enabled repositories". If this script would leave
-   nothing enabled, it is wrong, and it fails loudly instead of shipping a
-   broken image.
+We remove rather than setting gpgcheck=0 or stripping the gpgkey line: those
+"fix" the build by turning off signature verification on a repo shipped to
+people installing Flow. Nothing is lost by dropping an already-unusable repo,
+since Flow updates as a whole image via bootc.
 
-REPO_DIR is overridable for testing. See test-fix-repos.py.
+REPO_DIR / FLOW_OS_RELEASE are overridable for testing. See test-fix-repos.py.
 """
 
 import glob
@@ -46,7 +45,7 @@ ENABLED_RE = re.compile(r"^\s*enabled\s*=\s*(?P<value>\S+)", re.IGNORECASE)
 VARIABLE_RE = re.compile(r"\$\{?\w+\}?")
 
 
-def dnf_variables(os_release="/usr/lib/os-release"):
+def dnf_variables(os_release):
     """The dnf variables we can resolve, mirroring how dnf expands them."""
     releasever = ""
     try:
@@ -70,24 +69,23 @@ def expand(path, variables):
     return None if VARIABLE_RE.search(expanded) else expanded
 
 
-def missing_keys(body, variables):
-    """file:// gpgkey paths in these lines that resolve and do not exist.
-
-    Paths we cannot fully resolve are skipped: we will not disable a repo on a
-    guess.
-    """
-    missing = []
+def key_status(body, variables):
+    """(missing paths, unresolvable paths) for file:// gpgkeys in a section."""
+    missing, unresolvable = [], []
     for line in body:
         match = GPGKEY_RE.match(line)
         if not match:
             continue
         for token in match.group("value").split():
             if not token.startswith("file://"):
-                continue  # remote key; nothing we can check here
-            resolved = expand(token[len("file://"):], variables)
-            if resolved and not os.path.exists(resolved):
+                continue  # remote key; not ours to verify
+            raw = token[len("file://"):]
+            resolved = expand(raw, variables)
+            if resolved is None:
+                unresolvable.append(raw)
+            elif not os.path.exists(resolved):
                 missing.append(resolved)
-    return missing
+    return missing, unresolvable
 
 
 def parse_sections(lines):
@@ -112,73 +110,65 @@ def is_enabled(body):
     return True  # dnf treats a repo with no enabled= as enabled
 
 
-def disable(body):
-    """Force enabled=0, replacing the existing line or inserting after [name]."""
-    out, replaced = [], False
-    for line in body:
-        if ENABLED_RE.match(line) and not replaced:
-            out.append("enabled=0")
-            replaced = True
-        else:
-            out.append(line)
-    if not replaced:
-        out.insert(1, "enabled=0")
-    return out
-
-
 def main():
     repo_dir = os.environ.get("REPO_DIR", "/etc/yum.repos.d")
     os_release = os.environ.get("FLOW_OS_RELEASE", "/usr/lib/os-release")
     variables = dnf_variables(os_release)
+
+    print("--- repo audit ---")
     print(f"dnf variables: releasever={variables['releasever']!r} "
           f"basearch={variables['basearch']!r}")
 
-    files, disabled, still_enabled = [], [], 0
+    plans, doomed, survivors = [], [], 0
 
     for path in sorted(glob.glob(os.path.join(repo_dir, "*.repo"))):
         with open(path, encoding="utf-8") as handle:
             preamble, sections = parse_sections(handle.read().splitlines())
 
-        rebuilt, touched = [], False
+        keep, dropped = [], False
         for name, body in sections:
-            gone = missing_keys(body, variables)
-            if gone and is_enabled(body):
-                body = disable(body)
-                touched = True
-                disabled.append((os.path.basename(path), name, gone))
-            elif is_enabled(body):
-                still_enabled += 1
-            rebuilt.append(body)
+            missing, unresolvable = key_status(body, variables)
+            state = "enabled" if is_enabled(body) else "disabled"
 
-        files.append((path, preamble, rebuilt, touched))
+            if missing:
+                verdict = f"REMOVE (missing {', '.join(missing)})"
+                doomed.append((os.path.basename(path), name))
+                dropped = True
+            else:
+                verdict = "keep"
+                if unresolvable:
+                    verdict += f" (unresolvable: {', '.join(unresolvable)})"
+                keep.append((name, body))
+                survivors += 1
 
-    # Guard: disabling everything is never the right answer. Fail before
-    # writing, so a bad audit cannot produce a broken image.
-    if disabled and still_enabled == 0:
-        print(
-            f"ERROR: would disable {len(disabled)} repo(s) leaving none enabled.\n"
-            "       That is a bug in this audit, not a broken image. "
-            "Refusing to write.",
-            file=sys.stderr,
-        )
-        for filename, name, gone in disabled:
-            print(f"  would disable {filename} [{name}] -> {', '.join(gone)}",
-                  file=sys.stderr)
+            print(f"  {os.path.basename(path)} [{name}] {state} -> {verdict}")
+
+        plans.append((path, preamble, keep, dropped))
+
+    # Removing everything is always a bug here, never a correct outcome.
+    if doomed and survivors == 0:
+        print(f"\nERROR: would remove all {len(doomed)} repo(s), leaving none.\n"
+              "       That is a bug in this audit, not a broken image. "
+              "Refusing to write.", file=sys.stderr)
         return 1
 
-    for path, preamble, rebuilt, touched in files:
-        if touched:
-            body = [line for section in rebuilt for line in section]
+    for path, preamble, keep, dropped in plans:
+        if not dropped:
+            continue
+        if keep:
+            body = [line for _, section in keep for line in section]
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(preamble + body) + "\n")
+        else:
+            os.remove(path)  # every section was broken; the file is now noise
 
-    if disabled:
-        print(f"Disabled {len(disabled)} repo(s) with missing GPG keys "
-              f"({still_enabled} left enabled):")
-        for filename, name, gone in disabled:
-            print(f"  {filename} [{name}] -> missing {', '.join(gone)}")
+    print()
+    if doomed:
+        print(f"Removed {len(doomed)} broken repo(s), {survivors} remain:")
+        for filename, name in doomed:
+            print(f"  {filename} [{name}]")
     else:
-        print(f"No repos reference missing GPG keys ({still_enabled} enabled).")
+        print(f"No repos reference missing GPG keys ({survivors} present).")
 
     return 0
 

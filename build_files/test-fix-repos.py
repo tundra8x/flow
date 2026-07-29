@@ -1,8 +1,7 @@
 #!/usr/bin/python3
 """Tests fix-repos.py against .repo fixtures, without a container build.
 
-Every bug caught here is a 20-minute CI cycle saved. Two of these tests exist
-because the corresponding bug already reached CI once.
+Every test here exists because the corresponding bug reached CI at least once.
 """
 
 import os
@@ -44,103 +43,102 @@ with tempfile.TemporaryDirectory() as work:
         handle.write('NAME="Flow"\nID=bazzite\nVERSION_ID=44\n')
 
     arch = platform.machine()
-
-    # The key Fedora repos actually use, once variables are expanded.
     fedora_key = os.path.join(keys, f"RPM-GPG-KEY-fedora-44-{arch}")
     with open(fedora_key, "w") as handle:
         handle.write("key\n")
 
-    # --- Fixture 1: the regression that broke the build -----------------------
-    # gpgkey with dnf variables. A literal existence check marks this missing
-    # and disables every core Fedora repo, producing "no enabled repositories".
+    # --- Regression 1: dnf variables in gpgkey paths -------------------------
+    # Comparing these literally condemned every core Fedora repo.
     with open(os.path.join(repo_dir, "fedora.repo"), "w") as handle:
         handle.write(
-            "[fedora]\n"
-            "name=Fedora\n"
-            "enabled=1\n"
+            "[fedora]\nname=Fedora\nenabled=1\n"
             f"gpgkey=file://{keys}/RPM-GPG-KEY-fedora-$releasever-$basearch\n"
             "\n"
-            "[fedora-braces]\n"
-            "name=Fedora braces\n"
-            "enabled=1\n"
+            "[fedora-braces]\nname=Braces\nenabled=1\n"
             f"gpgkey=file://{keys}/RPM-GPG-KEY-fedora-${{releasever}}-${{basearch}}\n"
         )
 
-    # --- Fixture 2: the genuinely broken repo we are here to fix ---------------
+    # --- Regression 2: the real culprit, which ships DISABLED -----------------
+    # bootc-image-builder reads it regardless, so enabled=0 was never a fix.
+    # It must actually be removed.
     with open(os.path.join(repo_dir, "terra.repo"), "w") as handle:
         handle.write(
-            "[terra]\n"
-            "name=Terra\n"
-            "enabled=1\n"
+            "[terra]\nname=Terra\nenabled=1\n"
             f"gpgkey=file://{fedora_key}\n"
             "\n"
-            "[terra-mesa]\n"
-            "name=Terra Mesa\n"
-            "enabled=1\n"
+            "[terra-mesa]\nname=Terra Mesa\nenabled=0\n"
             "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-terra44-mesa\n"
         )
 
-    # --- Fixture 3: unresolvable variable, and a remote key -------------------
+    # --- Untouchables: unresolvable variables, and remote keys ---------------
     with open(os.path.join(repo_dir, "other.repo"), "w") as handle:
         handle.write(
-            "[mystery]\n"
-            "name=Unknown variable\n"
-            "enabled=1\n"
+            "[mystery]\nname=Unknown var\nenabled=1\n"
             "gpgkey=file:///etc/pki/rpm-gpg/KEY-$somethingelse\n"
             "\n"
-            "[remote]\n"
-            "name=Remote key\n"
-            "enabled=1\n"
+            "[remote]\nname=Remote\nenabled=1\n"
             "gpgkey=https://example.invalid/KEY\n"
+        )
+
+    # --- A file where every section is broken: the file should go ------------
+    with open(os.path.join(repo_dir, "allbad.repo"), "w") as handle:
+        handle.write(
+            "[bad-one]\nname=Bad one\nenabled=1\n"
+            "gpgkey=file:///nope/KEY-one\n"
+            "\n"
+            "[bad-two]\nname=Bad two\nenabled=0\n"
+            "gpgkey=file:///nope/KEY-two\n"
         )
 
     out = run(repo_dir, os_release)
 
     fedora = open(os.path.join(repo_dir, "fedora.repo")).read()
-    check("enabled=0" not in fedora,
-          "expanded $releasever/$basearch keys exist - must NOT be disabled")
-    print("ok  expands $releasever/$basearch (and ${...}) before checking")
+    check("[fedora]" in fedora and "[fedora-braces]" in fedora,
+          "repos whose expanded keys exist must survive")
+    print("ok  expands $releasever/$basearch (and ${...}) before judging")
 
     terra = open(os.path.join(repo_dir, "terra.repo")).read()
-    healthy, mesa = terra.split("[terra-mesa]")
-    check("enabled=1" in healthy, "healthy repo sharing the file must stay enabled")
-    check("enabled=0" in mesa, "terra-mesa should have been disabled")
-    check("gpgkey=" in mesa, "gpgkey must be preserved, not stripped")
+    check("[terra-mesa]" not in terra,
+          "terra-mesa must be REMOVED, not merely disabled")
+    check("RPM-GPG-KEY-terra44-mesa" not in terra,
+          "the broken section's lines must all be gone")
+    check("[terra]" in terra, "the healthy repo sharing the file must survive")
     check("gpgcheck=0" not in terra, "must never weaken signature checking")
-    print("ok  disables the genuinely-missing key, spares its neighbour")
+    print("ok  removes a broken repo that ships disabled, spares its neighbour")
 
     other = open(os.path.join(repo_dir, "other.repo")).read()
-    check("enabled=0" not in other,
-          "unresolvable variables and remote keys must be left alone")
+    check("[mystery]" in other and "[remote]" in other,
+          "unresolvable and remote gpgkeys must be left alone")
     print("ok  leaves unresolvable and remote gpgkeys untouched")
 
-    check("terra-mesa" in out, "must report what it disabled")
-    check("1 repo(s)" in out, f"should disable exactly one repo, got: {out!r}")
-    print("ok  disables exactly one repo and reports it")
+    check(not os.path.exists(os.path.join(repo_dir, "allbad.repo")),
+          "a file whose every section is broken should be removed entirely")
+    print("ok  deletes a repo file when all of its sections are broken")
 
-    # --- Fixture 4: the safety guard -----------------------------------------
-    # If the audit would leave nothing enabled, that is a bug in the audit.
+    check("Removed 3 broken repo(s)" in out, f"expected 3 removals, got: {out!r}")
+    check("terra-mesa" in out, "must report what it removed")
+    print("ok  removes exactly the broken repos and reports them")
+
+    # --- Guard: never remove everything --------------------------------------
     guard_dir = os.path.join(work, "guard")
     os.makedirs(guard_dir)
     with open(os.path.join(guard_dir, "all.repo"), "w") as handle:
-        handle.write(
-            "[only-one]\n"
-            "name=The only repo\n"
-            "enabled=1\n"
-            "gpgkey=file:///definitely/not/here\n"
-        )
+        handle.write("[only]\nname=Only repo\nenabled=1\n"
+                     "gpgkey=file:///definitely/not/here\n")
 
     guard_out = run(guard_dir, os_release, expect_rc=1)
-    check("leaving none enabled" in guard_out, "guard must explain itself")
-    untouched = open(os.path.join(guard_dir, "all.repo")).read()
-    check("enabled=1" in untouched, "guard must refuse to write, not write then fail")
-    print("ok  refuses to disable every repo, and writes nothing when it refuses")
+    check("leaving none" in guard_out, "guard must explain itself")
+    check(os.path.exists(os.path.join(guard_dir, "all.repo")),
+          "guard must refuse to write, not write and then complain")
+    check("[only]" in open(os.path.join(guard_dir, "all.repo")).read(),
+          "the file must be untouched when the guard trips")
+    print("ok  refuses to remove every repo, and writes nothing when it refuses")
 
     # --- Idempotence ----------------------------------------------------------
     before = open(os.path.join(repo_dir, "terra.repo")).read()
     run(repo_dir, os_release)
     after = open(os.path.join(repo_dir, "terra.repo")).read()
-    check(before == after, "second run must not change the file again")
+    check(before == after, "second run must not change anything further")
     print("ok  idempotent across repeated runs")
 
 print()
