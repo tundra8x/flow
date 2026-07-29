@@ -1,0 +1,29 @@
+# Installer ISO configuration for Flow.
+#
+# NOTE: the upstream ublue image-template ships iso-gnome.toml and iso-kde.toml
+# but both its Justfile and .github/workflows/build-disk.yml reference a plain
+# "iso.toml" that does not exist upstream. That mismatch fails the ISO build on
+# first run. This file is that missing piece, based on the KDE variant since
+# Bazzite (and therefore Flow) is a KDE Plasma system.
+
+[customizations.installer.kickstart]
+contents = """
+%post
+bootc switch --mutate-in-place --transport registry ghcr.io/tundra8x/flow:latest
+%end
+"""
+
+[customizations.installer.modules]
+enable = [
+  "org.fedoraproject.Anaconda.Modules.Storage",
+  "org.fedoraproject.Anaconda.Modules.Runtime",
+  "org.fedoraproject.Anaconda.Modules.Network",
+  "org.fedoraproject.Anaconda.Modules.Security",
+  "org.fedoraproject.Anaconda.Modules.Services",
+  "org.fedoraproject.Anaconda.Modules.Users",
+  "org.fedoraproject.Anaconda.Modules.Timezone"
+]
+
+disable = [
+  "org.fedoraproject.Anaconda.Modules.Subscription",
+]

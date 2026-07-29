@@ -1,0 +1,25 @@
+# Flow is built and run on Linux, but developed on Windows.
+#
+# Without this, git's autocrlf turns build scripts into CRLF on checkout and the
+# container build dies with "bad interpreter: /bin/bash^M" - a confusing failure
+# that looks like a broken image rather than a line-ending problem.
+# Everything here is LF, always, regardless of the developer's OS.
+
+* text=auto eol=lf
+
+*.sh          text eol=lf
+*.toml        text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.json5       text eol=lf
+*.env         text eol=lf
+*.md          text eol=lf
+Containerfile text eol=lf
+Justfile      text eol=lf
+LICENSE       text eol=lf
+
+# Mark the executables so the bit survives a Windows checkout.
+*.png  binary
+*.jpg  binary
+*.webp binary
+*.svg  text eol=lf
