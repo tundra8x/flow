@@ -40,7 +40,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        disk-type: ["qcow2", "anaconda-iso"]
+        # vmdk is the one VirtualBox opens natively - no qemu-img, no
+        # conversion, no scratch space. It is how Flow gets test-booted.
+        # qcow2 suits QEMU/libvirt. anaconda-iso is the installer people will
+        # eventually download; it is also the only type that depsolves
+        # packages, which makes it by far the most fragile, so fail-fast is
+        # off above and a broken ISO never blocks a bootable disk image.
+        disk-type: ["vmdk", "qcow2", "anaconda-iso"]
     permissions:
       contents: read
       packages: read
