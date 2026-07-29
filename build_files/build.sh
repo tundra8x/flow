@@ -13,6 +13,13 @@ cp -avf "/ctx/system_files"/. /
 # image would come out unbranded.
 /ctx/branding.sh
 
+# Bazzite ships repos pointing at GPG keys that are absent from the image. They
+# are already unusable, but being enabled they abort the anaconda-iso build
+# during depsolve. Disable them (rather than weakening gpgcheck) before the
+# image is sealed. Invoked via python3 explicitly so this does not depend on
+# the exec bit surviving a checkout.
+python3 /ctx/fix-repos.py
+
 ### Packages ------------------------------------------------------------------
 # Nothing yet. Phase 0 is the pipeline and the name; the shell, the tuning, and
 # the library land in later phases. Resisting the urge to install things here is
