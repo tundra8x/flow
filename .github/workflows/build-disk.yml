@@ -86,7 +86,12 @@ jobs:
           image: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}
           chown: ${{ env.USER_UID }}:${{ env.USER_GID }}
           types: ${{ matrix.disk-type }}
-          additional-args: --use-librepo=True
+          # --rootfs is required: Bazzite declares no default root filesystem,
+          # so bootc-image-builder aborts with "no default root filesystem type
+          # specified in container". The Justfile's local _build-bib recipe
+          # already passes --rootfs=btrfs; this keeps CI consistent with it.
+          # btrfs matches what Fedora Atomic and Bazzite use.
+          additional-args: --use-librepo=True --rootfs=btrfs
 
       - name: Upload disk images and Checksum to Job Artifacts
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
